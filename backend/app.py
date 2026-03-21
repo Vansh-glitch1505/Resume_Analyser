@@ -80,8 +80,7 @@ SKILL_ALIASES = {
 }
 
 # -----------------------------
-# Skill groups — if resume has any member, treat group as satisfied
-# Prevents "sql (missing)" when resume has postgresql/mysql
+#Groups
 # -----------------------------
 SKILL_GROUPS = {
     "sql":              ["sql", "postgresql", "mysql", "sqlite"],
@@ -160,7 +159,6 @@ def detect_ngrams(text):
 
 # -----------------------------
 # Skill matching helper — word boundary to prevent false positives
-# e.g. "java" won't match inside "javascript"
 # -----------------------------
 def skill_in_text(skill, text):
     return bool(re.search(rf'\b{re.escape(skill)}\b', text))
@@ -168,7 +166,6 @@ def skill_in_text(skill, text):
 
 # -----------------------------
 # Normalize extracted skills via alias map
-# e.g. ["node.js", "nodejs", "node"] → ["node"]
 # -----------------------------
 def normalize_skills(skills):
     normalized = set()
@@ -200,8 +197,6 @@ def extract_skills(tokens, text):
 
 # -----------------------------
 # Entity extraction
-# FIX: Cross-references SKILLS + SKILL_ALIASES to prevent tech terms
-# (PostgreSQL, React, Node, Vue.js etc.) from being tagged as locations
 # -----------------------------
 def extract_entities(doc):
     companies = []
