@@ -2,9 +2,13 @@ from flask import Flask, request, jsonify
 import pdfplumber
 import re
 import spacy
-from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from flask_cors import CORS
+
+# --- BERT semantic similarity ---
+from sentence_transformers import SentenceTransformer
+import numpy as np
 
 app = Flask(__name__)
 CORS(app)
@@ -13,6 +17,11 @@ nlp = spacy.load("en_core_web_sm")
 
 if "sentencizer" not in nlp.pipe_names:
     nlp.add_pipe("sentencizer")
+
+# Load BERT model once at startup
+print("Loading BERT sentence transformer model...")
+BERT_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+print("BERT model loaded.")
 
 
 # -----------------------------
@@ -58,8 +67,7 @@ SKILLS = [
 ]
 
 # -----------------------------
-# Alias map — variants → canonical skill name
-# Detected aliases are normalized before matching/scoring
+# Alias map
 # -----------------------------
 SKILL_ALIASES = {
     "node.js":      "node",
@@ -80,7 +88,7 @@ SKILL_ALIASES = {
 }
 
 # -----------------------------
-#Groups
+# Skill groups
 # -----------------------------
 SKILL_GROUPS = {
     "sql":              ["sql", "postgresql", "mysql", "sqlite"],
@@ -104,6 +112,74 @@ RESULT_TERMS = [
     "system", "platform", "pipeline", "service", "application",
     "users", "customers"
 ]
+
+# -----------------------------
+# FIX 4: JD Enrichment map
+# Short JDs are too small for BERT to embed well.
+# We expand detected role/skill keywords with related domain vocabulary
+# so BERT has enough context to produce a meaningful embedding.
+# -----------------------------
+JD_ENRICHMENT_MAP = {
+    "full stack":       "full stack developer frontend backend web application REST API database integration",
+    "frontend":         "frontend developer UI components web design responsive layout browser DOM",
+    "backend":          "backend developer server side API database business logic scalability performance",
+    "react":            "react javascript frontend component state management hooks JSX UI rendering SPA",
+    "node":             "node.js backend javascript server express REST API async event loop npm",
+    "node.js":          "node.js backend javascript server express REST API async event loop npm",
+    "python":           "python scripting automation backend data processing django fastapi flask OOP",
+    "django":           "django python web framework ORM models views templates REST authentication",
+    "fastapi":          "fastapi python async REST API backend microservices pydantic OpenAPI",
+    "postgresql":       "postgresql relational database SQL queries schema indexing joins transactions",
+    "mysql":            "mysql relational database SQL queries schema indexing stored procedures",
+    "mongodb":          "mongodb nosql database collections documents aggregation atlas",
+    "aws":              "amazon web services cloud infrastructure EC2 S3 Lambda RDS deployment IAM",
+    "gcp":              "google cloud platform cloud services kubernetes bigquery deployment pubsub",
+    "azure":            "microsoft azure cloud services devops pipelines deployment blob storage",
+    "machine learning": "machine learning model training prediction scikit-learn feature engineering data preprocessing",
+    "deep learning":    "deep learning neural networks tensorflow pytorch GPU training inference CNN RNN",
+    "devops":           "devops CI CD docker kubernetes infrastructure automation deployment monitoring",
+    "docker":           "docker containerization deployment microservices image registry orchestration compose",
+    "kubernetes":       "kubernetes container orchestration deployment scaling cluster management helm",
+    "data engineer":    "data engineering pipelines ETL airflow spark bigquery data warehouse transformation",
+    "android":          "android mobile development kotlin java UI jetpack compose material design",
+    "ios":              "ios mobile development swift xcode UIKit SwiftUI app store",
+    "flutter":          "flutter dart cross platform mobile development UI widgets state management",
+    "cybersecurity":    "cybersecurity penetration testing vulnerability OWASP network security IAM zero trust",
+    "javascript":       "javascript ES6 async await promises DOM manipulation web APIs frontend backend",
+    "typescript":       "typescript typed javascript interfaces generics decorators compile time safety",
+    "graphql":          "graphql API query language schema resolvers mutations subscriptions apollo",
+    "rest api":         "REST API HTTP endpoints JSON CRUD authentication authorization swagger",
+    "microservices":    "microservices distributed systems service mesh API gateway event driven architecture",
+}
+
+
+def enrich_job_description(job_description):
+    """
+    FIX 4: Expand a short JD with related domain vocabulary.
+    Scans for known role/skill keywords and appends relevant terms
+    so BERT has sufficient context for a meaningful embedding.
+    """
+    jd_lower = job_description.lower()
+    enrichments = []
+
+    for keyword, expansion in JD_ENRICHMENT_MAP.items():
+        if keyword in jd_lower:
+            enrichments.append(expansion)
+
+    if enrichments:
+        # Deduplicate words across all expansions
+        all_words   = " ".join(enrichments).split()
+        seen        = set()
+        unique_words = []
+        for w in all_words:
+            if w not in seen:
+                seen.add(w)
+                unique_words.append(w)
+        enriched = job_description + " " + " ".join(unique_words)
+    else:
+        enriched = job_description
+
+    return enriched
 
 
 # -----------------------------
@@ -158,7 +234,7 @@ def detect_ngrams(text):
 
 
 # -----------------------------
-# Skill matching helper — word boundary to prevent false positives
+# Skill matching helper
 # -----------------------------
 def skill_in_text(skill, text):
     return bool(re.search(rf'\b{re.escape(skill)}\b', text))
@@ -187,7 +263,6 @@ def extract_skills(tokens, text):
         if skill_in_text(skill, joined_tokens) or skill_in_text(skill, text) or skill in ngrams:
             found_skills.append(skill)
 
-    # Also check aliases so variant spellings in resumes are caught
     for alias, canonical in SKILL_ALIASES.items():
         if skill_in_text(alias, text):
             found_skills.append(canonical)
@@ -203,8 +278,7 @@ def extract_entities(doc):
     dates = []
     locations = []
 
-    # Build blocklist from known skills and aliases for GPE filtering
-    skills_lower = {s.lower() for s in SKILLS}
+    skills_lower  = {s.lower() for s in SKILLS}
     aliases_lower = {a.lower() for a in SKILL_ALIASES}
     tech_blocklist = skills_lower | aliases_lower
 
@@ -224,30 +298,24 @@ def extract_entities(doc):
                 continue
             if re.search(r"\.(js|ts|py|net|io|dev)$", value, re.IGNORECASE):
                 continue
-            if re.search(r"[A-Z][a-z]+[A-Z]", value):          # EmberJs, VueJs
+            if re.search(r"[A-Z][a-z]+[A-Z]", value):
                 continue
-            if re.search(r"[a-zA-Z](js|ts|py)$", value):       # Emberjs, Nodejs, Vuejs
+            if re.search(r"[a-zA-Z](js|ts|py)$", value):
                 continue
             locations.append(value)
             continue
 
         if ent.label_ == "ORG":
-            # Reject path-like patterns
             if "/" in value:
                 continue
-            # Reject URL/file extension patterns, but allow names like "J.P. Morgan"
             if re.search(r"\.\w{2,4}$", value) or re.search(r"\b\w+\.\w+/", value):
                 continue
-            # Reject single-word uppercase tech acronyms (AWS, PHP, SQL)
             if value.isupper() and len(value) <= 6:
                 continue
-            # Reject bullet fragments
             if value.startswith("•"):
                 continue
-            # Reject very long garbage strings
             if len(value.split()) > 4:
                 continue
-            # Reject if contains digits
             if re.search(r"\d", value):
                 continue
             companies.append(value)
@@ -287,7 +355,7 @@ def find_quantified_achievements(text):
 
 
 # -----------------------------
-# Extract job skills (with alias normalization)
+# Extract job skills
 # -----------------------------
 def extract_job_skills(job_description):
     job_description = job_description.lower()
@@ -306,7 +374,6 @@ def extract_job_skills(job_description):
 
 # -----------------------------
 # Group-aware skill comparison
-# "sql missing" when resume has "postgresql" is correctly treated as matched
 # -----------------------------
 def compare_skills(resume_skills, job_skills):
     matched = []
@@ -318,7 +385,6 @@ def compare_skills(resume_skills, job_skills):
             matched.append(skill)
             continue
 
-        # Group match — resume satisfies requirement via any group member
         group = SKILL_GROUPS.get(skill, [])
         if any(member in resume_set for member in group):
             matched.append(skill)
@@ -330,40 +396,148 @@ def compare_skills(resume_skills, job_skills):
 
 
 # -----------------------------
-# Semantic similarity
+# FIX 1: Extract only relevant resume lines
+# Strips noise (address, declaration, hobbies) and keeps only
+# lines from skills / experience / projects sections.
+# -----------------------------
+RESUME_SIGNAL_KEYWORDS = [
+    "experience", "skill", "built", "developed", "designed",
+    "engineer", "architect", "deploy", "manage", "led", "worked",
+    "implemented", "created", "maintained", "optimized", "integrated",
+    "python", "javascript", "react", "node", "aws", "api", "database",
+    "backend", "frontend", "fullstack", "full stack", "cloud", "docker",
+    "kubernetes", "sql", "postgresql", "mongodb", "java", "typescript",
+    "project", "application", "system", "platform", "service", "pipeline",
+    "framework", "library", "tool", "stack", "microservice", "server",
+    "responsible", "collaborated", "contributed", "achieved", "improved",
+]
+
+RESUME_NOISE_KEYWORDS = [
+    "references", "hobbies", "declaration", "date of birth",
+    "nationality", "marital", "father", "mother", "permanent address",
+    "correspondence address", "gender", "languages known", "religion",
+]
+
+
+def extract_relevant_resume_section(text):
+    """
+    FIX 1: Return only the high-signal lines from the resume.
+    Falls back to full text if filtering removes too much content.
+    """
+    lines  = text.split("\n")
+    relevant = []
+
+    for line in lines:
+        line_stripped = line.strip()
+        line_lower    = line_stripped.lower()
+
+        if not line_lower or len(line_lower.split()) < 3:
+            continue
+
+        if any(noise in line_lower for noise in RESUME_NOISE_KEYWORDS):
+            continue
+
+        if any(signal in line_lower for signal in RESUME_SIGNAL_KEYWORDS):
+            relevant.append(line_stripped)
+
+    result = " ".join(relevant)
+
+    # Fallback: if filtering was too aggressive, use full text
+    if len(result.split()) < 60:
+        return text
+
+    return result
+
+
+# -----------------------------
+# BERT chunking helpers
+# -----------------------------
+def chunk_text(text, chunk_size=400):
+    """Split text into overlapping word-level chunks to respect BERT 512-token limit."""
+    words  = text.split()
+    chunks = []
+    step   = chunk_size - 50   # 50-word overlap preserves boundary context
+    for i in range(0, len(words), step):
+        chunk = " ".join(words[i: i + chunk_size])
+        if chunk.strip():
+            chunks.append(chunk)
+    return chunks if chunks else [text]
+
+
+def get_bert_embedding(text):
+    """Return a single mean-pooled BERT embedding for arbitrarily long text."""
+    chunks     = chunk_text(text)
+    embeddings = BERT_MODEL.encode(chunks, convert_to_numpy=True)
+    return np.mean(embeddings, axis=0, keepdims=True)
+
+
+# -----------------------------
+# FIX 2 + 3: BERT semantic similarity
+#
+# FIX 2 — Soft scaling using realistic BERT range [0.20, 0.85]
+#   Old aggressive floor (0.30) compressed mid-range scores badly.
+#   New range gives a natural 0–100 output for real documents.
+#
+# FIX 3 — Max-chunk strategy
+#   Compare each resume chunk against the JD individually.
+#   Blend best-chunk (65%) + mean (35%) so one great section
+#   is rewarded without ignoring the rest of the resume.
 # -----------------------------
 def compute_resume_job_similarity(resume_text, job_description):
-    if job_description.strip() == "":
+    """
+    Returns a 0–100 semantic similarity score using BERT with all 4 fixes.
+    """
+    if not job_description.strip():
         return 0
 
-    documents = [resume_text, job_description]
-    vectorizer = TfidfVectorizer(stop_words="english")
-    matrix = vectorizer.fit_transform(documents)
-    similarity = cosine_similarity(matrix[0], matrix[1])
-    return round(similarity[0][0] * 100, 2)
+    # FIX 1: Focus on relevant resume content only
+    focused_resume = extract_relevant_resume_section(resume_text)
+    clean_resume   = clean_text(focused_resume)
+    clean_job      = clean_text(job_description)  # already enriched before this call
+
+    # Encode the JD once
+    job_embedding = get_bert_embedding(clean_job)
+
+    # FIX 3: Encode each resume chunk separately, take max similarity
+    chunks           = chunk_text(clean_resume)
+    chunk_embeddings = BERT_MODEL.encode(chunks, convert_to_numpy=True)
+
+    similarities = [
+        float(cosine_similarity(emb.reshape(1, -1), job_embedding)[0][0])
+        for emb in chunk_embeddings
+    ]
+
+    best_sim = max(similarities)
+    mean_sim = float(np.mean(similarities))
+
+    # Blend: best chunk weighted more, mean acts as a reality check
+    blended = (best_sim * 0.65) + (mean_sim * 0.35)
+
+    # FIX 2: Soft scaling — BERT real-world range is roughly [0.20, 0.85]
+    FLOOR    = 0.20
+    CEIL     = 0.85
+    rescaled = (blended - FLOOR) / (CEIL - FLOOR)
+    rescaled = max(0.0, min(1.0, rescaled))
+
+    return round(rescaled * 100, 2)
 
 
 # -----------------------------
 # Resume score
-# Rebalanced: equal weight on skill match + semantic alignment,
-# gentler achievement ramp, floor of 35 for resumes with real signal
 # -----------------------------
 def calculate_resume_score(skill_score, semantic_score, achievements, skills):
     score = 0
 
-    # For technical resumes, skill match is the most reliable signal
-    score += skill_score * 0.45         # primary weight — direct skill match
-    score += semantic_score * 0.20      # reduced — TF-IDF undersells tech resumes
-    score += min(len(achievements) * 3, 15)  # achievements: cap 15
-    score += min(len(skills) / len(SKILLS), 1.0) * 10  # skill breadth: 0–10
+    score += skill_score * 0.45
+    score += semantic_score * 0.20
+    score += min(len(achievements) * 3, 15)
+    score += min(len(skills) / len(SKILLS), 1.0) * 10
 
-    # Bonus: reward resumes with strong skill matches
     if skill_score >= 70:
         score += 8
     elif skill_score >= 50:
         score += 4
 
-    # Floor: any resume with real signal scores at least 40
     if skill_score > 0 or semantic_score > 20:
         score = max(score, 40)
 
@@ -418,12 +592,13 @@ def generate_resume_feedback(job_match_score, missing_skills, achievements, sema
 
     if semantic_score < 40:
         feedback.append(
-            f"Semantic similarity score is {semantic_score}%. "
+            f"Semantic similarity score is {semantic_score}% (BERT). "
             "Try mirroring the language and terminology from the job description more closely."
         )
     else:
         feedback.append(
-            f"Semantic similarity score is {semantic_score}% — your resume language aligns reasonably well with the job posting."
+            f"Semantic similarity score is {semantic_score}% (BERT) — "
+            "your resume language aligns well with the job posting."
         )
 
     return feedback
@@ -451,19 +626,21 @@ def upload_resume():
         return jsonify({"error": str(e)}), 422
 
     cleaned_text = clean_text(text)
+    doc          = nlp(text)
 
-    # spaCy doc built once, reused across tokenize + entity extraction
-    doc = nlp(text)
-
-    tokens = tokenize_text(doc)
-    skills = extract_skills(tokens, cleaned_text)
-    entities = extract_entities(doc)
+    tokens       = tokenize_text(doc)
+    skills       = extract_skills(tokens, cleaned_text)
+    entities     = extract_entities(doc)
     achievements = find_quantified_achievements(text)
-    job_skills = extract_job_skills(job_description)
+    job_skills   = extract_job_skills(job_description)
     matched, missing, score = compare_skills(skills, job_skills)
-    semantic_score = compute_resume_job_similarity(text, job_description)
+
+    # FIX 4: Enrich the JD before passing to BERT
+    enriched_jd    = enrich_job_description(job_description)
+    semantic_score = compute_resume_job_similarity(text, enriched_jd)
+
     resume_score = calculate_resume_score(score, semantic_score, achievements, skills)
-    feedback = generate_resume_feedback(score, missing, achievements, semantic_score)
+    feedback     = generate_resume_feedback(score, missing, achievements, semantic_score)
 
     return jsonify({
         "resume_score":            resume_score,
