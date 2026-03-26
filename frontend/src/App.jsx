@@ -54,10 +54,6 @@ export default function App() {
         {!analysisData ? (
           <div className="upload-page">
             <div className="upload-hero">
-              <div className="upload-hero__badge">
-                <span className="upload-hero__badge-dot" />
-                AI-Powered Resume Intelligence
-              </div>
               <h1 className="upload-hero__title">
                 Know exactly where<br />
                 <span>you stand.</span>
