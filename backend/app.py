@@ -9,7 +9,6 @@ from flask_cors import CORS
 # --- BERT semantic similarity ---
 from sentence_transformers import SentenceTransformer
 import numpy as np
-import threading
 
 app = Flask(__name__)
 CORS(app)
@@ -40,11 +39,6 @@ def get_bert_model():
         print("BERT model loaded.")
     return BERT_MODEL
 
-def warm_up_model():
-    """Load BERT in background so first real request isn't slow."""
-    get_bert_model()
-
-threading.Thread(target=warm_up_model, daemon=True).start()
 
 
 # -----------------------------
