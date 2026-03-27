@@ -2,3 +2,8 @@ flask
 flask-cors
 gunicorn
 pdfplumber
+spacy
+scikit-learn
+sentence-transformers
+numpy
+torch
