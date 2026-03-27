@@ -9,19 +9,42 @@ from flask_cors import CORS
 # --- BERT semantic similarity ---
 from sentence_transformers import SentenceTransformer
 import numpy as np
+import threading
 
 app = Flask(__name__)
 CORS(app)
 
-nlp = spacy.load("en_core_web_sm")
+# -----------------------------
+# SpaCy — safe load with auto-download
+# -----------------------------
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    import os
+    os.system("python -m spacy download en_core_web_sm")
+    nlp = spacy.load("en_core_web_sm")
 
 if "sentencizer" not in nlp.pipe_names:
     nlp.add_pipe("sentencizer")
 
-# Load BERT model once at startup
-print("Loading BERT sentence transformer model...")
-BERT_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
-print("BERT model loaded.")
+# -----------------------------
+# BERT — lazy load + background warm-up
+# -----------------------------
+BERT_MODEL = None
+
+def get_bert_model():
+    global BERT_MODEL
+    if BERT_MODEL is None:
+        print("Loading BERT model...")
+        BERT_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+        print("BERT model loaded.")
+    return BERT_MODEL
+
+def warm_up_model():
+    """Load BERT in background so first real request isn't slow."""
+    get_bert_model()
+
+threading.Thread(target=warm_up_model, daemon=True).start()
 
 
 # -----------------------------
@@ -113,12 +136,6 @@ RESULT_TERMS = [
     "users", "customers"
 ]
 
-# -----------------------------
-# FIX 4: JD Enrichment map
-# Short JDs are too small for BERT to embed well.
-# We expand detected role/skill keywords with related domain vocabulary
-# so BERT has enough context to produce a meaningful embedding.
-# -----------------------------
 JD_ENRICHMENT_MAP = {
     "full stack":       "full stack developer frontend backend web application REST API database integration",
     "frontend":         "frontend developer UI components web design responsive layout browser DOM",
@@ -154,22 +171,16 @@ JD_ENRICHMENT_MAP = {
 
 
 def enrich_job_description(job_description):
-    """
-    FIX 4: Expand a short JD with related domain vocabulary.
-    Scans for known role/skill keywords and appends relevant terms
-    so BERT has sufficient context for a meaningful embedding.
-    """
-    jd_lower = job_description.lower()
-    enrichments = []
+    jd_lower     = job_description.lower()
+    enrichments  = []
 
     for keyword, expansion in JD_ENRICHMENT_MAP.items():
         if keyword in jd_lower:
             enrichments.append(expansion)
 
     if enrichments:
-        # Deduplicate words across all expansions
-        all_words   = " ".join(enrichments).split()
-        seen        = set()
+        all_words    = " ".join(enrichments).split()
+        seen         = set()
         unique_words = []
         for w in all_words:
             if w not in seen:
@@ -255,9 +266,9 @@ def normalize_skills(skills):
 # Skill extraction
 # -----------------------------
 def extract_skills(tokens, text):
-    found_skills = []
+    found_skills  = []
     joined_tokens = " ".join(tokens)
-    ngrams = detect_ngrams(text)
+    ngrams        = detect_ngrams(text)
 
     for skill in SKILLS:
         if skill_in_text(skill, joined_tokens) or skill_in_text(skill, text) or skill in ngrams:
@@ -275,11 +286,11 @@ def extract_skills(tokens, text):
 # -----------------------------
 def extract_entities(doc):
     companies = []
-    dates = []
+    dates     = []
     locations = []
 
-    skills_lower  = {s.lower() for s in SKILLS}
-    aliases_lower = {a.lower() for a in SKILL_ALIASES}
+    skills_lower   = {s.lower() for s in SKILLS}
+    aliases_lower  = {a.lower() for a in SKILL_ALIASES}
     tech_blocklist = skills_lower | aliases_lower
 
     for ent in doc.ents:
@@ -331,7 +342,7 @@ def extract_entities(doc):
 # Achievement detection
 # -----------------------------
 def find_quantified_achievements(text):
-    bullets = re.split(r"[•\-\*▪→\n]", text)
+    bullets      = re.split(r"[•\-\*▪→\n]", text)
     achievements = []
 
     for bullet in bullets:
@@ -359,7 +370,7 @@ def find_quantified_achievements(text):
 # -----------------------------
 def extract_job_skills(job_description):
     job_description = job_description.lower()
-    job_skills = []
+    job_skills      = []
 
     for skill in SKILLS:
         if skill_in_text(skill, job_description):
@@ -376,8 +387,8 @@ def extract_job_skills(job_description):
 # Group-aware skill comparison
 # -----------------------------
 def compare_skills(resume_skills, job_skills):
-    matched = []
-    missing = []
+    matched    = []
+    missing    = []
     resume_set = set(resume_skills)
 
     for skill in job_skills:
@@ -395,11 +406,6 @@ def compare_skills(resume_skills, job_skills):
     return matched, missing, score
 
 
-# -----------------------------
-# FIX 1: Extract only relevant resume lines
-# Strips noise (address, declaration, hobbies) and keeps only
-# lines from skills / experience / projects sections.
-# -----------------------------
 RESUME_SIGNAL_KEYWORDS = [
     "experience", "skill", "built", "developed", "designed",
     "engineer", "architect", "deploy", "manage", "led", "worked",
@@ -420,11 +426,7 @@ RESUME_NOISE_KEYWORDS = [
 
 
 def extract_relevant_resume_section(text):
-    """
-    FIX 1: Return only the high-signal lines from the resume.
-    Falls back to full text if filtering removes too much content.
-    """
-    lines  = text.split("\n")
+    lines    = text.split("\n")
     relevant = []
 
     for line in lines:
@@ -442,7 +444,6 @@ def extract_relevant_resume_section(text):
 
     result = " ".join(relevant)
 
-    # Fallback: if filtering was too aggressive, use full text
     if len(result.split()) < 60:
         return text
 
@@ -453,10 +454,9 @@ def extract_relevant_resume_section(text):
 # BERT chunking helpers
 # -----------------------------
 def chunk_text(text, chunk_size=400):
-    """Split text into overlapping word-level chunks to respect BERT 512-token limit."""
     words  = text.split()
     chunks = []
-    step   = chunk_size - 50   # 50-word overlap preserves boundary context
+    step   = chunk_size - 50
     for i in range(0, len(words), step):
         chunk = " ".join(words[i: i + chunk_size])
         if chunk.strip():
@@ -465,42 +465,25 @@ def chunk_text(text, chunk_size=400):
 
 
 def get_bert_embedding(text):
-    """Return a single mean-pooled BERT embedding for arbitrarily long text."""
     chunks     = chunk_text(text)
-    embeddings = BERT_MODEL.encode(chunks, convert_to_numpy=True)
+    embeddings = get_bert_model().encode(chunks, convert_to_numpy=True)
     return np.mean(embeddings, axis=0, keepdims=True)
 
 
 # -----------------------------
-# FIX 2 + 3: BERT semantic similarity
-#
-# FIX 2 — Soft scaling using realistic BERT range [0.20, 0.85]
-#   Old aggressive floor (0.30) compressed mid-range scores badly.
-#   New range gives a natural 0–100 output for real documents.
-#
-# FIX 3 — Max-chunk strategy
-#   Compare each resume chunk against the JD individually.
-#   Blend best-chunk (65%) + mean (35%) so one great section
-#   is rewarded without ignoring the rest of the resume.
+# BERT semantic similarity
 # -----------------------------
 def compute_resume_job_similarity(resume_text, job_description):
-    """
-    Returns a 0–100 semantic similarity score using BERT with all 4 fixes.
-    """
     if not job_description.strip():
         return 0
 
-    # FIX 1: Focus on relevant resume content only
     focused_resume = extract_relevant_resume_section(resume_text)
     clean_resume   = clean_text(focused_resume)
-    clean_job      = clean_text(job_description)  # already enriched before this call
+    clean_job      = clean_text(job_description)
 
-    # Encode the JD once
-    job_embedding = get_bert_embedding(clean_job)
-
-    # FIX 3: Encode each resume chunk separately, take max similarity
+    job_embedding    = get_bert_embedding(clean_job)
     chunks           = chunk_text(clean_resume)
-    chunk_embeddings = BERT_MODEL.encode(chunks, convert_to_numpy=True)
+    chunk_embeddings = get_bert_model().encode(chunks, convert_to_numpy=True)
 
     similarities = [
         float(cosine_similarity(emb.reshape(1, -1), job_embedding)[0][0])
@@ -509,11 +492,8 @@ def compute_resume_job_similarity(resume_text, job_description):
 
     best_sim = max(similarities)
     mean_sim = float(np.mean(similarities))
+    blended  = (best_sim * 0.65) + (mean_sim * 0.35)
 
-    # Blend: best chunk weighted more, mean acts as a reality check
-    blended = (best_sim * 0.65) + (mean_sim * 0.35)
-
-    # FIX 2: Soft scaling — BERT real-world range is roughly [0.20, 0.85]
     FLOOR    = 0.20
     CEIL     = 0.85
     rescaled = (blended - FLOOR) / (CEIL - FLOOR)
@@ -605,6 +585,14 @@ def generate_resume_feedback(job_match_score, missing_skills, achievements, sema
 
 
 # -----------------------------
+# Root route — health check
+# -----------------------------
+@app.route("/")
+def home():
+    return "Backend is running ✅"
+
+
+# -----------------------------
 # API endpoint
 # -----------------------------
 @app.route("/upload", methods=["POST"])
@@ -635,7 +623,6 @@ def upload_resume():
     job_skills   = extract_job_skills(job_description)
     matched, missing, score = compare_skills(skills, job_skills)
 
-    # FIX 4: Enrich the JD before passing to BERT
     enriched_jd    = enrich_job_description(job_description)
     semantic_score = compute_resume_job_similarity(text, enriched_jd)
 
