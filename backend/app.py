@@ -5,6 +5,7 @@ import spacy
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from flask_cors import CORS
+import os
 
 # --- BERT semantic similarity ---
 from sentence_transformers import SentenceTransformer
@@ -644,5 +645,5 @@ def upload_resume():
 # Run server
 # -----------------------------
 if __name__ == "__main__":
-    print("Resume Analyzer running at http://localhost:5000")
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
