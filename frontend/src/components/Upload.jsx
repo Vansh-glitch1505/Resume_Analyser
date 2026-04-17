@@ -1,6 +1,8 @@
 import { useState, useRef, useCallback } from "react";
 import axios from "axios";
 
+const API_URL = import.meta.env.VITE_API_URL || "https://resume-analyser-3.onrender.com";
+
 export default function Upload({ onAnalysisComplete, isLoading, setIsLoading, setError }) {
   const [file, setFile] = useState(null);
   const [jobDescription, setJobDescription] = useState("");
@@ -34,14 +36,14 @@ export default function Upload({ onAnalysisComplete, isLoading, setIsLoading, se
     formData.append("resume", file);
     formData.append("job_description", jobDescription);
     try {
-      const response = await axios.post("/upload", formData, {
+      const response = await axios.post("https://resume-analyser-3.onrender.com/upload", formData, {
         headers: { "Content-Type": "multipart/form-data" },
       });
       onAnalysisComplete(response.data);
     } catch (err) {
       setError(
         err.response?.data?.message ||
-        "Failed to connect to the server. Make sure the backend is running on port 5000."
+        "Failed to connect to the server. Make sure the backend is running."
       );
     } finally {
       setIsLoading(false);
