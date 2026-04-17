@@ -3,7 +3,8 @@ flask-cors
 gunicorn
 pdfplumber
 spacy
-https://download.pytorch.org/whl/cpu/torch-2.2.0%2Bcpu-cp311-cp311-linux_x86_64.whl
 scikit-learn
 sentence-transformers
 numpy
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
