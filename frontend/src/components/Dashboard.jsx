@@ -130,7 +130,7 @@ export default function Upload({ onAnalysisComplete, isLoading, setIsLoading, se
         className={`submit-btn ${canSubmit ? "submit-btn--active" : "submit-btn--disabled"}`}
         onClick={handleSubmit}
         disabled={!canSubmit}
-      >
+      > 
         {isLoading ? (
           <>
             <span className="spinner" />
