@@ -12,7 +12,7 @@ from sentence_transformers import SentenceTransformer
 import numpy as np
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=["https://resume-analyser-brown-rho.vercel.app"])
 
 # -----------------------------
 # SpaCy — safe load with auto-download
